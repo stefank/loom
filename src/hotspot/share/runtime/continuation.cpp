@@ -2163,6 +2163,10 @@ private:
   void recurse_thaw_stub_frame(const frame& hf, frame& caller, int num_frames);
   void finish_thaw(frame& f);
 
+  bool must_fix_thawed_frame(stackChunkOop chunk);
+  template <typename RegisterMapT>
+  void maybe_fix_thawed_frame(stackChunkOop chunk, const frame& f, const RegisterMapT* map);
+
   void push_return_frame(frame& f);
   inline frame new_entry_frame();
   template<typename FKind> frame new_stack_frame(const frame& hf, frame& caller, bool bottom);
@@ -2521,6 +2525,39 @@ void ThawBase::clear_bitmap_bits(intptr_t* start, int range) {
                               chunk->bit_index_for(start+range));
 }
 
+bool ThawBase::must_fix_thawed_frame(stackChunkOop chunk) {
+  if (_barriers) {
+    // The object is old enough that we need to perform barriers on the stack
+    // chunks. At this point we know that the chunk has been relativized and we
+    // need to fix it before thawing the frame.
+    return true;
+  }
+
+  if (chunk->is_gc_mode()) {
+    // For ZGC, we can't run without _barriers and at the same time have
+    // relativized the chunk. Note that it's also not enough to check
+    // is_gc_mode(), because that property is lazily set by ZGC.
+    assert(!UseZGC, "The thread should have run the GC barriers");
+
+    // For other GCs, _barriers is only set when the chunk becomes old, but
+    // not when the GC copies objects to survivor space. Even after the first
+    // copying of the stack chunk, and other objects, the pointers inside the
+    // stack chunk will be invalidated. We relativize these pointers and,
+    // optionally, perform other transformations that make the chunk more GC
+    // friendly. After that has been done we change the chunk to the "gc mode".
+    return true;
+  }
+
+  return false;
+}
+
+template <typename RegisterMapT>
+void ThawBase::maybe_fix_thawed_frame(stackChunkOop chunk, const frame& f, const RegisterMapT* map) {
+  if (must_fix_thawed_frame(chunk)) {
+    chunk->fix_thawed_frame(f, map);
+  }
+}
+
 NOINLINE void ThawBase::recurse_thaw_interpreted_frame(const frame& hf, frame& caller, int num_frames) {
   assert(hf.is_interpreted_frame(), "");
 
@@ -2576,7 +2613,7 @@ NOINLINE void ThawBase::recurse_thaw_interpreted_frame(const frame& hf, frame& c
 
   if (!bottom) {
     // can only fix caller once this frame is thawed (due to callee saved regs)
-    _cont.tail()->fix_thawed_frame(caller, SmallRegisterMap::instance);
+    maybe_fix_thawed_frame(_cont.tail(), caller, SmallRegisterMap::instance);
   } else if (_cont.tail()->has_bitmap() && locals > 0) {
     assert(hf.is_heap_frame(), "should be");
     clear_bitmap_bits(ContinuationHelper::InterpretedFrame::frame_bottom(hf) - locals, locals);
@@ -2647,7 +2684,7 @@ void ThawBase::recurse_thaw_compiled_frame(const frame& hf, frame& caller, int n
   if (!bottom) {
     // can only fix caller once this frame is thawed (due to callee saved regs)
     // This happens on the stack
-    _cont.tail()->fix_thawed_frame(caller, SmallRegisterMap::instance);
+    maybe_fix_thawed_frame(_cont.tail(), caller, SmallRegisterMap::instance);
   } else if (_cont.tail()->has_bitmap() && added_argsize > 0) {
     clear_bitmap_bits(heap_sp + ContinuationHelper::CompiledFrame::size(hf), added_argsize);
   }
@@ -2692,7 +2729,7 @@ void ThawBase::recurse_thaw_stub_frame(const frame& hf, frame& caller, int num_f
     map.set_include_argument_oops(false);
     f.oop_map()->update_register_map(&f, &map);
     ContinuationHelper::update_register_map_with_callee(caller, &map);
-    _cont.tail()->fix_thawed_frame(caller, &map);
+    maybe_fix_thawed_frame(_cont.tail(), caller, &map);
   }
 
   DEBUG_ONLY(after_thaw_java_frame(f, false);)
@@ -2720,7 +2757,9 @@ void ThawBase::finish_thaw(frame& f) {
     f.set_sp(f.sp() - 1);
   }
   push_return_frame(f);
-  chunk->fix_thawed_frame(f, SmallRegisterMap::instance); // can only fix caller after push_return_frame (due to callee saved regs)
+
+  // can only fix caller after push_return_frame (due to callee saved regs)
+  maybe_fix_thawed_frame(chunk, f, SmallRegisterMap::instance);
 
   assert(_cont.is_empty() == _cont.last_frame().is_empty(), "");
 
