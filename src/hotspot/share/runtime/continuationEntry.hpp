@@ -29,6 +29,7 @@
 #include "oops/oop.hpp"
 #include "oops/oopsHierarchy.hpp"
 #include "runtime/continuation.hpp"
+#include "utilities/sizes.hpp"
 
 class nmethod;
 class RegisterMap;

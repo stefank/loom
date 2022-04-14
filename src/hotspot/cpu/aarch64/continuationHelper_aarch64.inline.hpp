@@ -46,7 +46,6 @@ inline void ContinuationEntry::update_register_map(RegisterMap* map) const {
   frame::update_map_with_saved_link(map, fp);
 }
 
-
 template<typename FKind>
 static inline intptr_t** link_address(const frame& f) {
   assert(FKind::is_instance(f), "");
